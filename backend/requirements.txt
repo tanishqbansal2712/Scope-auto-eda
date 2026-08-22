@@ -1,0 +1,29 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+pandas==2.0.3
+numpy<2.0
+openpyxl==3.1.5
+python-multipart==0.0.9
+
+# Optional — enables two specific features: the Shapiro-Wilk normality test
+# and the chi-square test of independence (both under "Deeper statistics").
+# Everything else in the app works without it. Left out of the base install
+# because scipy needs a build toolchain to compile from source on setups it
+# doesn't have a prebuilt wheel for. If you're on 64-bit Python, any recent
+# scipy works — just run: pip install scipy
+# If you're on 32-bit Windows (like this project's default target), scipy
+# stopped publishing 32-bit Windows wheels after 1.8.1, so pin to that exact
+# version to avoid a source build:
+# scipy==1.8.1
+
+# Optional — only needed if you want to upload .parquet files.
+# pandas==2.0.3 does not have a hard dependency on this, and pyarrow
+# does not ship 32-bit Windows wheels, so it's left out of the base
+# install. Uncomment if you're on 64-bit Python and want Parquet support:
+# pyarrow==17.0.0
+
+# NOTE: intentionally using plain "uvicorn" instead of "uvicorn[standard]".
+# The [standard] extra pulls in httptools and uvloop for extra performance,
+# but httptools has no prebuilt wheel for 32-bit Windows / Python 3.8, so
+# pip tries to compile it from source and fails without Visual C++ Build
+# Tools. Plain uvicorn works everywhere and is plenty fast for this app.
