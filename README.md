@@ -91,27 +91,6 @@ Without it, everything else (data quality, PCA, clustering, time series,
 ML readiness) still works fully -- the two affected panels just show a
 short note instead.
 
-## Deploying (Render)
-
-The whole app -- frontend and backend -- deploys as a single Render web
-service, since `main.py` already serves both from one FastAPI app.
-
-1. Push this project to a GitHub repo, with `render.yaml` at the repo
-   root (next to `backend/` and `frontend/`, not inside either).
-2. On [render.com](https://render.com), **New -> Blueprint**, select the
-   repo. Render reads `render.yaml` and pre-fills the build/start
-   commands and free plan automatically.
-3. Deploy. You'll get one URL -- that's the whole app, UI and API both.
-
-Render's free tier sleeps after 15 minutes of no traffic; the next visit
-takes 30-60 seconds to wake up. That's expected on the free plan, not a
-bug.
-
-A split deployment (static frontend on Vercel, API on Render) was
-considered and deliberately avoided: Vercel's serverless functions have a
-hard, non-configurable 4.5MB request body limit, which would cap uploads
-far below what this app is meant to handle. A single Render service has
-no such limit.
 
 ## Windows / 32-bit Python notes
 
