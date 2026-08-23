@@ -414,4 +414,695 @@ const heroSection = document.getElementById('heroSection');
 const subnav = document.getElementById('subnav');
 
 ['dragenter','dragover'].forEach(evt => dropZone.addEventListener(evt, e => {
-  e.preventDefault(); dropZone.cl
+  e.preventDefault(); dropZone.classList.add('drag');
+}));
+['dragleave','drop'].forEach(evt => dropZone.addEventListener(evt, e => {
+  e.preventDefault(); dropZone.classList.remove('drag');
+}));
+dropZone.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) handleFile(fileInput.files[0]);
+});
+
+function resetUI(){
+  results.style.display = 'none';
+  results.innerHTML = '';
+  heroSection.style.display = 'block';
+  subnav.classList.remove('show');
+  errorBox.style.display = 'none';
+  fileInput.value = '';
+  dropZone.classList.remove('scanning');
+  scopeTitle.textContent = 'Drop a file here, or click to browse';
+  scopeHint.textContent = 'Analysis runs the moment it lands';
+  window.scrollTo({top:0});
+}
+
+async function handleFile(file){
+  errorBox.style.display = 'none';
+  dropZone.classList.add('scanning');
+  scopeTitle.textContent = 'Reading ' + file.name;
+  scopeHint.textContent = 'Computing stats, quality checks, correlations...';
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try{
+    const res = await fetch(API_URL, { method:'POST', body:formData });
+
+    let data;
+    try{
+      data = await res.json();
+    }catch(parseErr){
+      // The server sent back something that isn't valid JSON — usually an
+      // empty body because the process was killed mid-request (out of
+      // memory on a hosting free tier, for example) rather than a clean
+      // error response. Give an honest explanation instead of surfacing
+      // the raw "Unexpected end of JSON input" browser error.
+      throw new Error(
+        `The server didn't return a valid response (HTTP ${res.status}). ` +
+        `This usually means it ran out of memory or timed out while processing the file. ` +
+        `Try a smaller file, or check the server logs if this keeps happening.`
+      );
+    }
+
+    if(!res.ok){
+      throw new Error(data.detail || 'Analysis failed.');
+    }
+    dropZone.classList.remove('scanning');
+    renderReport(data);
+  }catch(err){
+    dropZone.classList.remove('scanning');
+    scopeTitle.textContent = 'Drop a file here, or click to browse';
+    scopeHint.textContent = 'Analysis runs the moment it lands';
+    errorBox.textContent = '⚠ ' + err.message;
+    errorBox.style.display = 'block';
+  }
+}
+
+function fmt(n, decimals=2){
+  if(n === null || n === undefined) return '—';
+  if(Number.isInteger(n)) return n.toLocaleString();
+  return Number(n).toLocaleString(undefined, {maximumFractionDigits:decimals});
+}
+
+function renderReport(data){
+  heroSection.style.display = 'none';
+  results.style.display = 'block';
+  subnav.classList.add('show');
+
+  const ov = data.overview;
+  const dq = data.data_quality || {};
+  let html = '';
+
+  html += `<div class="file-banner">
+    <span>&#9679; <span class="fname">${escapeHtml(data.filename)}</span> &nbsp; analyzed</span>
+    <button class="reset-btn" onclick="resetUI()">Analyze another file</button>
+  </div>`;
+
+  // ---------------- Overview ----------------
+  html += `<div class="section" id="sec-overview">`;
+  html += `<div class="section-label">Overview</div>`;
+  html += `<div class="stat-grid">
+    <div class="stat-cell"><div class="stat-value">${fmt(ov.n_rows)}</div><div class="stat-label">Rows</div></div>
+    <div class="stat-cell"><div class="stat-value">${fmt(ov.n_cols)}</div><div class="stat-label">Columns</div></div>
+    <div class="stat-cell"><div class="stat-value">${ov.memory_mb} MB</div><div class="stat-label">In memory</div></div>
+    <div class="stat-cell"><div class="stat-value ${ov.missing_pct > 5 ? 'warn':'ok'}">${ov.missing_pct}%</div><div class="stat-label">Missing values</div></div>
+    <div class="stat-cell"><div class="stat-value ${ov.duplicate_rows > 0 ? 'warn':'ok'}">${fmt(ov.duplicate_rows)}</div><div class="stat-label">Duplicate rows</div></div>
+  </div>`;
+  html += `</div>`;
+
+  // ---------------- Data Quality ----------------
+  html += `<div class="section" id="sec-quality">`;
+  html += `<div class="section-label">Data quality</div>`;
+  html += renderDataQuality(dq, ov);
+  html += `</div>`;
+
+  // ---------------- Correlations (top pairs list) ----------------
+  if(data.top_correlations && data.top_correlations.length){
+    html += `<div class="section-label">Strongest correlations</div>`;
+    html += `<div class="panel corr-list">`;
+    data.top_correlations.forEach(p => {
+      const pct = Math.round(Math.abs(p.correlation) * 100);
+      const color = p.correlation >= 0 ? 'var(--accent)' : 'var(--danger)';
+      html += `<div class="corr-row">
+        <div class="corr-pair">${escapeHtml(p.col_a)} &harr; ${escapeHtml(p.col_b)}</div>
+        <div class="corr-bar"><div class="corr-bar-fill" style="width:${pct}%; background:${color};"></div></div>
+        <div class="corr-val">${p.correlation.toFixed(2)}</div>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
+  // ---------------- Column cards ----------------
+  html += `<div class="section" id="sec-columns">`;
+  html += `<div class="section-label">Columns <span class="count">(${data.columns.length})</span></div>`;
+  html += `<div class="col-grid" id="colGrid">`;
+  data.columns.forEach((col, i) => {
+    html += renderColumnCard(col, i);
+  });
+  html += `</div></div>`;
+
+  // ---------------- Correlation heatmap ----------------
+  html += `<div class="section" id="sec-correlations">`;
+  if(data.correlation){
+    html += `<div class="section-label">Correlation matrix</div>`;
+    html += `<div class="panel"><div id="heatmap" style="height:${Math.max(300, data.correlation.columns.length * 34)}px;"></div></div>`;
+  }
+  html += `</div>`;
+
+  // ---------------- Deeper statistics ----------------
+  html += `<div class="section" id="sec-deeper">`;
+  html += `<div class="section-label">Deeper statistics</div>`;
+  html += renderDeeperStatistics(data.deeper_statistics || {});
+  html += `</div>`;
+
+  // ---------------- ML readiness ----------------
+  html += `<div class="section" id="sec-ml">`;
+  html += `<div class="section-label">ML readiness</div>`;
+  html += renderMlReadiness(data.ml_readiness || {});
+  html += `</div>`;
+
+  // ---------------- Data preview ----------------
+  html += `<div class="section" id="sec-preview">`;
+  if(data.preview_rows && data.preview_rows.length){
+    html += `<div class="section-label">Data preview (first 10 rows)</div>`;
+    html += `<div class="panel table-scroll">`;
+    const cols = Object.keys(data.preview_rows[0]);
+    html += `<table class="preview"><thead><tr>` + cols.map(c=>`<th>${escapeHtml(c)}</th>`).join('') + `</tr></thead><tbody>`;
+    data.preview_rows.forEach(row => {
+      html += `<tr>` + cols.map(c => `<td>${escapeHtml(String(row[c] ?? ''))}</td>`).join('') + `</tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+  html += `</div>`;
+
+  results.innerHTML = html;
+
+  // ---- Render charts after DOM insert ----
+  data.columns.forEach((col, i) => {
+    const c = paletteColor(i);
+    if(col.dtype === 'numeric' && col.histogram){
+      const edges = col.histogram.bin_edges;
+      const centers = edges.slice(0,-1).map((e,idx)=> (e + edges[idx+1])/2 );
+      Plotly.newPlot('hist-'+i, [{
+        x: centers, y: col.histogram.counts, type:'bar',
+        marker:{color:c}
+      }], plotlyLayout(), plotlyConfig());
+    }
+    if((col.dtype === 'categorical' || col.dtype === 'boolean') && col.top_values && col.top_values.length){
+      const vals = col.top_values.slice(0,8);
+      Plotly.newPlot('cat-'+i, [{
+        x: vals.map(v=>v.count), y: vals.map(v=>v.value), type:'bar', orientation:'h',
+        marker:{color:c}
+      }], plotlyLayout({l:80}), plotlyConfig());
+    }
+  });
+
+  if(data.correlation){
+    Plotly.newPlot('heatmap', [{
+      z: data.correlation.matrix,
+      x: data.correlation.columns,
+      y: data.correlation.columns,
+      type:'heatmap',
+      colorscale: [[0,'#e2695f'],[0.5,'#181b22'],[1,'#4fd8c4']],
+      zmin:-1, zmax:1,
+      showscale:true
+    }], plotlyLayout({l:120, b:100}), plotlyConfig());
+  }
+
+  renderQualityCharts(dq);
+  renderDeeperCharts(data.deeper_statistics || {});
+  renderMlCharts(data.ml_readiness || {});
+  setupScrollSpy();
+}
+
+function renderDataQuality(dq, ov){
+  const missingness = dq.missingness || {};
+  const mismatches = dq.type_mismatches || [];
+  const flags = dq.cardinality_flags || [];
+  const dupSample = dq.duplicate_sample || [];
+
+  let html = `<div class="stat-grid" style="margin-bottom:16px;">
+    <div class="stat-cell"><div class="stat-value ${ (missingness.columns_with_missing||[]).length ? 'warn':'ok' }">${(missingness.columns_with_missing||[]).length}</div><div class="stat-label">Columns with missing data</div></div>
+    <div class="stat-cell"><div class="stat-value ${mismatches.length ? 'danger':'ok'}">${mismatches.length}</div><div class="stat-label">Type mismatch warnings</div></div>
+    <div class="stat-cell"><div class="stat-value ${flags.length ? 'warn':'ok'}">${flags.length}</div><div class="stat-label">Cardinality flags</div></div>
+    <div class="stat-cell"><div class="stat-value ${ov.duplicate_rows ? 'warn':'ok'}">${ov.duplicate_rows}</div><div class="stat-label">Duplicate rows</div></div>
+  </div>`;
+
+  html += `<div class="quality-grid">`;
+
+  // Missingness heatmap panel
+  html += `<div class="panel">
+    <div class="panel-title">Missingness pattern</div>
+    <div class="panel-sub">Where values are missing across a sample of rows</div>`;
+  if(missingness.matrix && missingness.matrix.columns.length){
+    html += `<div id="missingMatrix" style="height:${Math.max(180, Math.min(420, missingness.matrix.rows.length*3))}px;"></div>`;
+  } else {
+    html += `<div class="empty-note">No missing values detected — nothing to show here.</div>`;
+  }
+  html += `</div>`;
+
+  // Missingness correlation OR cardinality flags (whichever is more useful) — show both stacked on the right
+  html += `<div class="panel">`;
+  if(missingness.correlation){
+    html += `<div class="panel-title">Missingness correlation</div>
+    <div class="panel-sub">Do columns tend to be missing together?</div>
+    <div id="missingCorr" style="height:${Math.max(160, missingness.correlation.columns.length * 32)}px;"></div>`;
+  } else {
+    html += `<div class="panel-title">Cardinality &amp; type checks</div>
+    <div class="panel-sub">ID-like columns, high-cardinality traps, and type mismatches</div>`;
+    html += renderFlagsAndMismatches(flags, mismatches);
+  }
+  html += `</div>`;
+  html += `</div>`; // quality-grid
+
+  // If missingness correlation took the right panel, still show flags/mismatches below
+  if(missingness.correlation && (flags.length || mismatches.length)){
+    html += `<div class="panel" style="margin-top:16px;">
+      <div class="panel-title">Cardinality &amp; type checks</div>
+      <div class="panel-sub">ID-like columns, high-cardinality traps, and type mismatches</div>
+      ${renderFlagsAndMismatches(flags, mismatches)}
+    </div>`;
+  }
+
+  // Duplicate row sample
+  if(dupSample.length){
+    html += `<div class="panel" style="margin-top:16px;">
+      <div class="panel-title">Duplicate rows (sample)</div>
+      <div class="panel-sub">${ov.duplicate_rows} duplicate row${ov.duplicate_rows===1?'':'s'} found &mdash; showing up to 10</div>
+      <div class="table-scroll">`;
+    const cols = Object.keys(dupSample[0]);
+    html += `<table class="preview"><thead><tr>` + cols.map(c=>`<th>${escapeHtml(c)}</th>`).join('') + `</tr></thead><tbody>`;
+    dupSample.forEach(row => {
+      html += `<tr>` + cols.map(c => `<td>${escapeHtml(String(row[c] ?? ''))}</td>`).join('') + `</tr>`;
+    });
+    html += `</tbody></table></div></div>`;
+  }
+
+  return html;
+}
+
+function renderFlagsAndMismatches(flags, mismatches){
+  let html = '';
+  if(!flags.length && !mismatches.length){
+    html += `<div class="empty-note">Nothing flagged &mdash; columns look clean.</div>`;
+    return html;
+  }
+  if(flags.length){
+    html += `<div class="flag-list">`;
+    flags.forEach(f => {
+      const badge = f.flag === 'id_like'
+        ? `<span class="badge b-id">ID&#8209;like</span>`
+        : `<span class="badge b-highcard">High cardinality</span>`;
+      html += `<div class="flag-row">
+        <div><span class="col">${escapeHtml(f.column)}</span> ${badge}</div>
+        <div class="meta">${f.unique.toLocaleString()} unique (${f.unique_pct}%)</div>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+  if(mismatches.length){
+    mismatches.forEach(m => {
+      html += `<div class="mismatch-card">
+        <div class="col">${escapeHtml(m.column)} <span class="badge b-mismatch">Type mismatch</span></div>
+        <div class="detail">${m.parseable_pct}% of values look ${escapeHtml(m.looks_like)}, but not all &mdash; column stayed text/categorical.</div>
+        <div class="bad-vals">e.g. ${m.example_bad_values.map(escapeHtml).join(', ')}</div>
+      </div>`;
+    });
+  }
+  return html;
+}
+
+function renderQualityCharts(dq){
+  const missingness = dq.missingness || {};
+  if(missingness.matrix && missingness.matrix.columns.length){
+    const m = missingness.matrix;
+    Plotly.newPlot('missingMatrix', [{
+      z: m.rows,
+      x: m.columns,
+      type: 'heatmap',
+      colorscale: [[0, '#181b22'], [1, '#f077b0']],
+      zmin: 0, zmax: 1,
+      showscale: false,
+      xgap: 2, ygap: 1
+    }], plotlyLayout({l:10, b:60, t:10}, {reverseY:true}), plotlyConfig());
+  }
+  if(missingness.correlation){
+    const c = missingness.correlation;
+    Plotly.newPlot('missingCorr', [{
+      z: c.matrix,
+      x: c.columns,
+      y: c.columns,
+      type: 'heatmap',
+      colorscale: [[0,'#181b22'],[1,'#f077b0']],
+      zmin: 0, zmax: 1,
+      showscale: false
+    }], plotlyLayout({l:100, b:60}), plotlyConfig());
+  }
+}
+
+function renderDeeperStatistics(ds){
+  let html = '';
+
+  if(ds.scipy_available === false){
+    html += `<div class="panel" style="margin-bottom:16px;">
+      <div class="empty-note">Normality and chi-square tests need the optional <code>scipy</code> package, which isn't installed on this backend. Everything else below (PCA, clustering, time series) still works. See requirements.txt for install instructions.</div>
+    </div>`;
+  }
+
+  html += `<div class="quality-grid">`;
+
+  // PCA + clustering panel
+  const pca = ds.pca;
+  html += `<div class="panel">
+    <div class="panel-title">PCA &amp; cluster preview</div>`;
+  if(pca && pca.projection && pca.projection.length){
+    const varPct = pca.explained_variance ? pca.explained_variance.map(v => Math.round(v*100)) : [];
+    html += `<div class="panel-sub">First two components explain ${varPct[0]||0}% + ${varPct[1]||0}% of variance${pca.chosen_k ? ` &middot; ${pca.chosen_k} clusters found` : ''}</div>`;
+    html += `<div id="pcaScatter" style="height:340px;"></div>`;
+    if(pca.chosen_k){
+      html += `<div class="pca-legend" id="pcaLegend"></div>`;
+    }
+  } else {
+    html += `<div class="panel-sub">Needs at least 2 numeric columns and a handful of rows</div>
+    <div class="empty-note">Not enough numeric data to compute this.</div>`;
+  }
+  html += `</div>`;
+
+  // Elbow chart panel
+  html += `<div class="panel">
+    <div class="panel-title">Cluster count (elbow curve)</div>`;
+  if(pca && pca.elbow){
+    html += `<div class="panel-sub">Where inertia stops dropping sharply is a reasonable cluster count</div>`;
+    html += `<div id="elbowChart" style="height:340px;"></div>`;
+  } else {
+    html += `<div class="panel-sub">Needs at least 2 numeric columns</div>
+    <div class="empty-note">Not enough numeric data to compute this.</div>`;
+  }
+  html += `</div>`;
+  html += `</div>`; // quality-grid
+
+  // Chi-square tests
+  if(ds.chi_square_tests && ds.chi_square_tests.length){
+    html += `<div class="panel" style="margin-top:16px;">
+      <div class="panel-title">Chi-square tests (categorical relationships)</div>
+      <div class="panel-sub">Whether pairs of categorical columns look statistically related</div>
+      <div class="chi-list">`;
+    ds.chi_square_tests.forEach(t => {
+      const badge = t.significant ? `<span class="badge b-sig">Related (p&lt;0.05)</span>` : `<span class="badge b-not-normal">No clear relation</span>`;
+      html += `<div class="chi-row">
+        <div class="chi-pair">${escapeHtml(t.col_a)} &harr; ${escapeHtml(t.col_b)} ${badge}</div>
+        <div class="chi-p">p = ${t.p_value < 0.001 ? '<0.001' : t.p_value.toFixed(3)}</div>
+      </div>`;
+    });
+    html += `</div></div>`;
+  }
+
+  // Time series
+  const ts = ds.time_series;
+  if(ts && ts.series && ts.series.length){
+    html += `<div class="panel" style="margin-top:16px;">
+      <div class="panel-title">Time series &mdash; ${escapeHtml(ts.datetime_column)}</div>
+      <div class="panel-sub">Trend and seasonality per numeric column</div>
+      <div class="ts-tabs" id="tsTabs">`;
+    ts.series.forEach((s, i) => {
+      html += `<button class="ts-tab ${i===0?'active':''}" data-ts-idx="${i}" onclick="switchTsTab(${i})">${escapeHtml(s.column)}</button>`;
+    });
+    html += `</div>`;
+    ts.series.forEach((s, i) => {
+      html += `<div class="ts-panel ${i===0?'active':''}" id="tsPanel-${i}">
+        <div id="tsTrend-${i}" style="height:220px;"></div>
+        <div class="ts-subgrid">
+          <div><div class="panel-sub">By day of week</div><div id="tsDow-${i}" style="height:180px;"></div></div>
+          <div><div class="panel-sub">By month</div><div id="tsMoy-${i}" style="height:180px;"></div></div>
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
+  return html;
+}
+
+function switchTsTab(idx){
+  document.querySelectorAll('.ts-tab').forEach(el => el.classList.toggle('active', el.dataset.tsIdx == idx));
+  document.querySelectorAll('.ts-panel').forEach(el => el.classList.toggle('active', el.id === 'tsPanel-'+idx));
+  window.dispatchEvent(new Event('resize')); // let Plotly resize newly-visible charts
+}
+
+function renderDeeperCharts(ds){
+  const pca = ds.pca;
+  if(pca && pca.projection && pca.projection.length){
+    const proj = pca.projection;
+    if(pca.clusters && pca.clusters.length){
+      const clusterIds = [...new Set(pca.clusters)].sort((a,b)=>a-b);
+      const traces = clusterIds.map(cid => {
+        const pts = proj.filter((_, i) => pca.clusters[i] === cid);
+        return {
+          x: pts.map(p=>p[0]), y: pts.map(p=>p[1]||0), mode:'markers', type:'scatter',
+          marker:{color: paletteColor(cid), size:6, opacity:0.75},
+          name: 'Cluster ' + (cid+1)
+        };
+      });
+      Plotly.newPlot('pcaScatter', traces, plotlyLayout({l:50,b:40}), plotlyConfig());
+      const legend = document.getElementById('pcaLegend');
+      if(legend){
+        legend.innerHTML = clusterIds.map(cid =>
+          `<div class="pca-legend-item"><span class="pca-legend-dot" style="background:${paletteColor(cid)};"></span>Cluster ${cid+1}</div>`
+        ).join('');
+      }
+    } else {
+      Plotly.newPlot('pcaScatter', [{
+        x: proj.map(p=>p[0]), y: proj.map(p=>p[1]||0), mode:'markers', type:'scatter',
+        marker:{color: paletteColor(0), size:6, opacity:0.75}
+      }], plotlyLayout({l:50,b:40}), plotlyConfig());
+    }
+  }
+  if(pca && pca.elbow){
+    const chosen = pca.chosen_k;
+    Plotly.newPlot('elbowChart', [{
+      x: pca.elbow.k, y: pca.elbow.inertia, type:'scatter', mode:'lines+markers',
+      line:{color:'#4fd8c4'}, marker:{color: pca.elbow.k.map(k => k===chosen ? '#f077b0' : '#4fd8c4'), size: pca.elbow.k.map(k => k===chosen ? 10 : 6)}
+    }], plotlyLayout({l:50,b:40}), plotlyConfig());
+  }
+
+  const ts = ds.time_series;
+  if(ts && ts.series && ts.series.length){
+    ts.series.forEach((s, i) => {
+      const c = paletteColor(i);
+      Plotly.newPlot('tsTrend-'+i, [{
+        x: s.trend.dates, y: s.trend.values, type:'scatter', mode:'lines',
+        line:{color:c, width:2}
+      }], plotlyLayout({l:50,b:40}), plotlyConfig());
+      Plotly.newPlot('tsDow-'+i, [{
+        x: s.day_of_week.labels.map(d=>d.slice(0,3)), y: s.day_of_week.values, type:'bar',
+        marker:{color:c}
+      }], plotlyLayout({l:40,b:30}), plotlyConfig());
+      Plotly.newPlot('tsMoy-'+i, [{
+        x: s.month_of_year.labels.map(m=>m.slice(0,3)), y: s.month_of_year.values, type:'bar',
+        marker:{color:c}
+      }], plotlyLayout({l:40,b:30}), plotlyConfig());
+    });
+  }
+}
+
+function scoreColor(score){
+  if(score >= 80) return '#a3e635';
+  if(score >= 50) return '#e8a23d';
+  return '#e2695f';
+}
+
+function renderMlReadiness(ml){
+  if(!ml || ml.readiness_score === undefined){
+    return `<div class="panel"><div class="empty-note">Not enough usable columns to assess ML readiness.</div></div>`;
+  }
+  const sc = ml.readiness_score;
+  const col = scoreColor(sc);
+  let html = `<div class="panel score-panel">
+    <div class="score-ring" style="background:conic-gradient(${col} ${sc*3.6}deg, var(--panel-raised) 0deg); position:relative;">
+      <div style="position:absolute; inset:8px; border-radius:50%; background:var(--panel); display:flex; align-items:center; justify-content:center;">
+        <div class="score-ring-num" style="color:${col};">${sc}</div>
+      </div>
+      <div class="score-ring-label">Readiness</div>
+    </div>
+    <div class="score-breakdown">`;
+  ml.score_breakdown.forEach(c => {
+    const c2 = scoreColor(c.score);
+    html += `<div class="score-row">
+      <div class="label">${escapeHtml(c.label)}</div>
+      <div class="bar"><div class="bar-fill" style="width:${c.score}%; background:${c2};"></div></div>
+      <div class="note">${escapeHtml(c.note)}</div>
+    </div>`;
+  });
+  html += `</div></div>`;
+
+  // Target picker + feature importance / class balance
+  if(ml.targets && ml.targets.length){
+    html += `<div class="panel" style="margin-top:16px;">
+      <div class="panel-title">Feature importance by target</div>
+      <div class="panel-sub">Mutual information between each column and a candidate target &mdash; a fast signal of relevance, not a trained model</div>
+      <div class="target-tabs" id="targetTabs">`;
+    ml.targets.forEach((t, i) => {
+      const dotColor = t.task === 'regression' ? 'var(--accent)' : 'var(--warn)';
+      html += `<button class="target-tab ${i===0?'active':''}" data-target-idx="${i}" onclick="switchTargetTab(${i})">
+        <span class="task-dot" style="background:${dotColor};"></span>${escapeHtml(t.target)}
+      </button>`;
+    });
+    html += `</div>`;
+
+    ml.targets.forEach((t, i) => {
+      html += `<div class="target-panel ${i===0?'active':''}" id="targetPanel-${i}">`;
+      if(t.task === 'classification'){
+        const badgeClass = t.imbalanced ? 'warn' : 'ok';
+        const badgeText = t.imbalanced
+          ? `Imbalanced &mdash; majority class is ${t.majority_pct}% of rows`
+          : `Reasonably balanced classes`;
+        html += `<div class="imbalance-note ${badgeClass}">${badgeText}</div>`;
+      }
+      html += `<div class="two-col">
+        <div id="importance-${i}" style="height:${Math.max(160, t.top_features.length*32)}px;"></div>
+        <div>`;
+      if(t.task === 'classification' && t.class_distribution){
+        html += `<div id="classDist-${i}" style="height:${Math.max(160, t.class_distribution.length*28)}px;"></div>`;
+      }
+      html += `</div></div></div>`;
+    });
+    html += `</div>`;
+  } else {
+    html += `<div class="panel" style="margin-top:16px;"><div class="empty-note">No suitable target columns found (needs a numeric column, or a categorical column with 2&#8211;20 classes).</div></div>`;
+  }
+
+  // Train/test split preview
+  if(ml.split_preview && ml.split_preview.length){
+    html += `<div class="panel" style="margin-top:16px;">
+      <div class="panel-title">Train / test split preview</div>
+      <div class="panel-sub">Row counts at common split ratios &mdash; use stratified sampling if a classification target is imbalanced</div>
+      <table class="split-table"><thead><tr><th>Split</th><th>Train rows</th><th>Test rows</th></tr></thead><tbody>`;
+    ml.split_preview.forEach(s => {
+      html += `<tr><td>${s.train_pct}% / ${100-s.train_pct}%</td><td>${s.train_rows.toLocaleString()}</td><td>${s.test_rows.toLocaleString()}</td></tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+
+  return html;
+}
+
+function switchTargetTab(idx){
+  document.querySelectorAll('.target-tab').forEach(el => el.classList.toggle('active', el.dataset.targetIdx == idx));
+  document.querySelectorAll('.target-panel').forEach(el => el.classList.toggle('active', el.id === 'targetPanel-'+idx));
+  window.dispatchEvent(new Event('resize'));
+}
+
+function renderMlCharts(ml){
+  if(!ml || !ml.targets) return;
+  ml.targets.forEach((t, i) => {
+    const feats = t.top_features.slice().reverse(); // horizontal bar: highest on top
+    Plotly.newPlot('importance-'+i, [{
+      x: feats.map(f=>f.importance), y: feats.map(f=>f.feature), type:'bar', orientation:'h',
+      marker:{color: paletteColor(i)}
+    }], plotlyLayout({l:100,b:30}), plotlyConfig());
+
+    if(t.task === 'classification' && t.class_distribution){
+      const cd = t.class_distribution.slice().reverse();
+      Plotly.newPlot('classDist-'+i, [{
+        x: cd.map(c=>c.count), y: cd.map(c=>c.value), type:'bar', orientation:'h',
+        marker:{color: paletteColor(i+3)}
+      }], plotlyLayout({l:80,b:30}), plotlyConfig());
+    }
+  });
+}
+
+function plotlyLayout(margin, opts){
+  opts = opts || {};
+  return {
+    margin: Object.assign({t:10,r:10,b:30,l:40}, margin||{}),
+    paper_bgcolor:'transparent',
+    plot_bgcolor:'transparent',
+    font:{color:'#7c8494', family:'JetBrains Mono, monospace', size:10},
+    xaxis:{gridcolor:'#2a2e38', zerolinecolor:'#2a2e38'},
+    yaxis: opts.reverseY
+      ? {gridcolor:'#2a2e38', zerolinecolor:'#2a2e38', autorange:'reversed'}
+      : {gridcolor:'#2a2e38', zerolinecolor:'#2a2e38'},
+    showlegend:false
+  };
+}
+function plotlyConfig(){ return {displayModeBar:false, responsive:true}; }
+
+function renderColumnCard(col, i){
+  const accent = paletteColor(i);
+  let body = '';
+
+  if(col.dtype === 'numeric' && col.stats){
+    const s = col.stats;
+    body += `<div class="mini-stats">
+      <div class="mini-stat"><div class="v">${fmt(s.mean)}</div><div class="l">Mean</div></div>
+      <div class="mini-stat"><div class="v">${fmt(s.median)}</div><div class="l">Median</div></div>
+      <div class="mini-stat"><div class="v">${fmt(s.std)}</div><div class="l">Std dev</div></div>
+      <div class="mini-stat"><div class="v">${fmt(s.min)}</div><div class="l">Min</div></div>
+      <div class="mini-stat"><div class="v">${fmt(s.max)}</div><div class="l">Max</div></div>
+      <div class="mini-stat"><div class="v">${fmt(s.q75 - s.q25 >= 0 ? s.q75-s.q25 : null)}</div><div class="l">IQR</div></div>
+    </div>`;
+    if(col.histogram){
+      body += `<div class="chart-holder" id="hist-${i}" style="height:120px;"></div>`;
+    }
+    if(col.distribution_label){
+      body += `<div class="dist-label">${escapeHtml(col.distribution_label)}</div>`;
+    }
+    if(col.normality_test){
+      const nt = col.normality_test;
+      const badge = nt.is_normal
+        ? `<span class="badge b-normal">Normal (p=${nt.p_value < 0.001 ? '<0.001' : nt.p_value.toFixed(3)})</span>`
+        : `<span class="badge b-not-normal">Not normal (p=${nt.p_value < 0.001 ? '<0.001' : nt.p_value.toFixed(3)})</span>`;
+      body += `<div class="badge-row">${badge}</div>`;
+    }
+    if(col.outliers && col.outliers.count > 0){
+      body += `<div class="outlier-tag">${col.outliers.count} outliers (${col.outliers.pct}%)</div>`;
+    }
+  } else if(col.dtype === 'categorical' || col.dtype === 'boolean'){
+    body += `<div class="chart-holder" id="cat-${i}" style="height:140px;"></div>`;
+  } else if(col.dtype === 'text' && col.text_stats){
+    body += `<div class="mini-stats">
+      <div class="mini-stat"><div class="v">${fmt(col.text_stats.avg_length,1)}</div><div class="l">Avg length</div></div>
+      <div class="mini-stat"><div class="v">${fmt(col.text_stats.max_length)}</div><div class="l">Max length</div></div>
+    </div>`;
+  } else if(col.dtype === 'datetime' && col.datetime_stats){
+    body += `<div class="mini-stats">
+      <div class="mini-stat"><div class="v" style="font-size:11px;">${escapeHtml(String(col.datetime_stats.min||'—').slice(0,10))}</div><div class="l">Earliest</div></div>
+      <div class="mini-stat"><div class="v" style="font-size:11px;">${escapeHtml(String(col.datetime_stats.max||'—').slice(0,10))}</div><div class="l">Latest</div></div>
+    </div>`;
+  }
+
+  let badges = '';
+  if(col.cardinality_flag === 'id_like') badges += `<span class="badge b-id">ID&#8209;like</span>`;
+  if(col.cardinality_flag === 'high_cardinality') badges += `<span class="badge b-highcard">High cardinality</span>`;
+  if(col.type_mismatch) badges += `<span class="badge b-mismatch">Type mismatch</span>`;
+  const badgeRow = badges ? `<div class="badge-row">${badges}</div>` : '';
+
+  const imputeHint = col.imputation_suggestion
+    ? `<div class="impute-hint"><b>Imputation:</b> ${escapeHtml(col.imputation_suggestion)}</div>`
+    : '';
+
+  const missingBar = col.missing_pct > 0
+    ? `<div class="missing-bar"><div class="missing-bar-fill" style="width:${col.missing_pct}%; background:${accent};"></div></div>`
+    : '';
+
+  return `<div class="col-card" style="--card-accent:${accent};">
+    <div class="col-card-head">
+      <div class="col-name">${escapeHtml(col.name)}</div>
+      <div class="col-type ${col.dtype}">${col.dtype}</div>
+    </div>
+    <div style="color:var(--muted); font-size:11px; font-family:var(--mono);">
+      ${col.unique.toLocaleString()} unique &middot; ${col.missing_pct}% missing
+    </div>
+    ${missingBar}
+    ${badgeRow}
+    ${body}
+    ${imputeHint}
+  </div>`;
+}
+
+function setupScrollSpy(){
+  const links = Array.from(subnav.querySelectorAll('a'));
+  const sections = links.map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
+  function onScroll(){
+    let current = sections[0];
+    const scrollPos = window.scrollY + 100;
+    sections.forEach(sec => { if(sec.offsetTop <= scrollPos) current = sec; });
+    links.forEach(a => a.classList.toggle('active', current && a.getAttribute('href') === '#'+current.id));
+  }
+  window.addEventListener('scroll', onScroll);
+  onScroll();
+}
+
+function escapeHtml(str){
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+</script>
+</body>
+</html>
