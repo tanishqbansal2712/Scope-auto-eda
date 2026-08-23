@@ -18,7 +18,16 @@ from fastapi.staticfiles import StaticFiles
 
 from analysis import build_report, load_dataframe
 
-MAX_FILE_SIZE_MB = 100
+# 25MB, not the 100MB this used to say. Render's free tier caps a service
+# at 512MB of RAM total (shared with Python/FastAPI/pandas itself), and
+# pandas typically uses several times a CSV's on-disk size once it's
+# loaded into a DataFrame plus the analysis this app runs on top of it.
+# A 60-80MB file was enough to exceed that and get the whole process
+# killed mid-request — which the browser sees as an empty response, not
+# a clean error message. This cap keeps uploads within what the free tier
+# can reliably handle. If you're running this locally, or have upgraded
+# to a paid Render plan with more RAM, raise this back up.
+MAX_FILE_SIZE_MB = 25
 ALLOWED_EXTENSIONS = {".csv", ".tsv", ".txt", ".xlsx", ".xls", ".json", ".parquet"}
 
 app = FastAPI(title="Auto-EDA API")
